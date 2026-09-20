@@ -1,9 +1,12 @@
 """命令行入口。
 
-提供三个子命令：
+提供以下子命令：
 - clean：清洗考勤流水并输出每日汇总；
 - detect：识别考勤异常；
-- summarize：输出考勤绩效辅助摘要。
+- summarize：输出考勤绩效辅助摘要；
+- metrics：输出出勤稳定性等衍生指标；
+- notify：为异常生成通知文案；
+- report：导出异常/汇总为 CSV / Markdown / HTML。
 """
 from __future__ import annotations
 
@@ -18,8 +21,11 @@ from attendance_anomaly.data_loader import load_punches
 from attendance_anomaly.models.attendance import PunchRecord
 from attendance_anomaly.services.anomaly_engine import AnomalyEngine
 from attendance_anomaly.services.attendance_cleaner import AttendanceCleaner
+from attendance_anomaly.services.attendance_metrics import AttendanceMetricsService
 from attendance_anomaly.services.llm_client import MockLLMClient, OpenAICompatibleClient
+from attendance_anomaly.services.notification_service import NotificationService
 from attendance_anomaly.services.performance_assist import PerformanceAssistService
+from attendance_anomaly.services.report_service import ReportService
 
 
 def _build_llm(config):
@@ -64,6 +70,38 @@ def cmd_summarize(args, config) -> None:
     _print_json([s.to_dict() for s in summaries])
 
 
+def cmd_metrics(args, config) -> None:
+    records = _load_data(args.data)
+    days = AttendanceCleaner().clean(records)
+    service = AttendanceMetricsService()
+    employee_ids = sorted({d.employee_id for d in days})
+    _print_json([service.analyze(emp_id, days).to_dict() for emp_id in employee_ids])
+
+
+def cmd_notify(args, config) -> None:
+    records = _load_data(args.data)
+    days = AttendanceCleaner().clean(records)
+    anomalies = AnomalyEngine(config).detect(days)
+    notifications = NotificationService().build_notifications(anomalies)
+    _print_json([n.to_dict() for n in notifications])
+
+
+def cmd_report(args, config) -> None:
+    records = _load_data(args.data)
+    days = AttendanceCleaner().clean(records)
+    anomalies = AnomalyEngine(config).detect(days)
+    rows = [a.to_dict() for a in anomalies]
+    report = ReportService()
+    if args.format == "csv":
+        print(report.to_csv(rows))
+    elif args.format == "markdown":
+        print(report.to_markdown_table(rows))
+    elif args.format == "html":
+        print(report.to_html_page("考勤异常报告", [{"heading": "异常列表", "rows": rows}]))
+    else:
+        _print_json(rows)
+
+
 def main(argv: List[str] | None = None) -> None:
     config = load_config()
     parser = argparse.ArgumentParser(prog="attendance-anomaly", description="考勤异常识别与绩效辅助评估系统")
@@ -78,6 +116,13 @@ def main(argv: List[str] | None = None) -> None:
     summarize = sub.add_parser("summarize", help="绩效辅助摘要")
     summarize.add_argument("--work-days", type=int, default=5, help="考核周期内的应出勤天数")
     summarize.set_defaults(func=cmd_summarize)
+
+    sub.add_parser("metrics", help="出勤衍生指标").set_defaults(func=cmd_metrics)
+    sub.add_parser("notify", help="生成异常通知").set_defaults(func=cmd_notify)
+
+    report = sub.add_parser("report", help="导出报告")
+    report.add_argument("--format", choices=["json", "csv", "markdown", "html"], default="json")
+    report.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)
     args.func(args, config)
