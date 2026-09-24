@@ -19,10 +19,13 @@ from typing import List
 from attendance_anomaly.config import load_config
 from attendance_anomaly.data_loader import load_punches
 from attendance_anomaly.models.attendance import PunchRecord
+from attendance_anomaly.models.holiday import WorkingCalendar
 from attendance_anomaly.services.anomaly_engine import AnomalyEngine
 from attendance_anomaly.services.attendance_cleaner import AttendanceCleaner
 from attendance_anomaly.services.attendance_metrics import AttendanceMetricsService
+from attendance_anomaly.services.leave_service import LeaveService
 from attendance_anomaly.services.llm_client import MockLLMClient, OpenAICompatibleClient
+from attendance_anomaly.services.monthly_settlement import MonthlySettlementService
 from attendance_anomaly.services.notification_service import NotificationService
 from attendance_anomaly.services.performance_assist import PerformanceAssistService
 from attendance_anomaly.services.report_service import ReportService
@@ -102,6 +105,24 @@ def cmd_report(args, config) -> None:
         _print_json(rows)
 
 
+def cmd_monthly_report(args, config) -> None:
+    """输出指定月份的考勤结算结果。"""
+    records = _load_data(args.data)
+    days = AttendanceCleaner().clean(records)
+    anomalies = AnomalyEngine(config).detect(days)
+
+    calendar = WorkingCalendar([])
+    leave = LeaveService([])
+    settlement = MonthlySettlementService(calendar, leave)
+
+    employee_ids = sorted({d.employee_id for d in days})
+    results = [
+        settlement.settle(emp_id, args.year_month, days, anomalies).to_dict()
+        for emp_id in employee_ids
+    ]
+    _print_json(results)
+
+
 def main(argv: List[str] | None = None) -> None:
     config = load_config()
     parser = argparse.ArgumentParser(prog="attendance-anomaly", description="考勤异常识别与绩效辅助评估系统")
@@ -123,6 +144,10 @@ def main(argv: List[str] | None = None) -> None:
     report = sub.add_parser("report", help="导出报告")
     report.add_argument("--format", choices=["json", "csv", "markdown", "html"], default="json")
     report.set_defaults(func=cmd_report)
+
+    monthly = sub.add_parser("monthly-report", help="月度考勤结算")
+    monthly.add_argument("--year-month", required=True, help="月份，如 2026-09")
+    monthly.set_defaults(func=cmd_monthly_report)
 
     args = parser.parse_args(argv)
     args.func(args, config)
